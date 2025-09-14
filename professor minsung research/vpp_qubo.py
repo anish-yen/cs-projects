@@ -2,109 +2,35 @@
 vpp_qubo.py
 ========================
 
-This module provides a utility for constructing Quadratic Unconstrained
-Binary Optimization (QUBO) formulations of the downlink Vector
-Perturbation Precoding (VPP) problem described in the paper *Quantum
-Annealing for Large MIMO Downlink Vector Perturbation Precoding*
-(`goalpaper.pdf`).  The implementation here mirrors the mathematical
-derivations in Section II and Section III A of that paper.  In short,
-VPP seeks to find an integer-valued perturbation vector ``v`` that
-minimizes the transmit power of a zero‑forcing precoded signal in a
-multi‑user MIMO downlink.  That optimization can be expressed as a
-quadratic form of complex vectors and subsequently mapped into a
-real-valued quadratic form.  Finally, each integer component of the
-perturbation is represented by a linear combination of binary
-variables, yielding a QUBO.
+This constructs Quadratic Unconstrained Binary Optimization (QUBO)
+for downlink Vector Perturbation Precoding (VPP)
 
-The high‑level steps are:
+  • Original VPP objective (Eq. 2):
+      v* = argmin_v || Hᴴ (H Hᴴ)⁻¹ (u + τ v) ||²
+    This is the NP-hard transmit-power minimization over an integer (Gaussian)
+    perturbation v that improves zero-forcing precoding.
 
-  1. Compute the receiver covariance matrix
-     ``R = (H @ H.conj().T)**(-1)``, where ``H`` is the ``Nr×Nt``
-     complex channel matrix.  For full rank ``H`` (``Nr ≤ Nt``), the
-     matrix ``R`` is well defined.
+  • Real quadratic form (our Eq. 4 template): write R = (H Hᴴ)⁻¹ and convert
+    complex quadratic to a real block form with w = [Re(v); Im(v)],
+      E(w) = wᵀ (τ² M) w + gᵀ w + const,
+    where M = [[Re(R), -Im(R)],[Im(R), Re(R)]] and g encodes 2τ·Re(uᴴ R v).
+    (This is the standard complex→real embedding used before we binary-encode
+    the integers).
 
-  2. Form the block‑real matrix ``M`` that maps the complex quadratic
-     form ``v^H R v`` into the real domain.  Let ``a = Re(v)`` and
-     ``b = Im(v)``.  Then
+  • Binary integer encoding (Eq. 7): each real/imag entry of v is mapped using
+      w_i = Σ_{m=0}^{t-1} 2^m q_{i,m} - 2^t q_{i,t},   q_{i,m} ∈ {0,1},
+    so w_i ∈ [−2^t, 2^t − 1]. With t=1 we already cover {−1,0,1} (and ±2) which
+    is typically sufficient for VPP.
 
-        v^H R v = [a^T b^T] @ M @ [a; b],
+  • Final QUBO (Eq. 8): substitute w = B q into the real quadratic to obtain
+      E(q) = qᵀ [ Bᵀ (τ² M) B ] q + (Bᵀ g)ᵀ q + const
+            = qᵀ Q q  with  Q = Bᵀ (τ² M) B + diag(Bᵀ g),
+    where diagonal entries act as linear biases f_i and off-diagonals as couplers
+    g_{ij} in the paper’s notation.
 
-     where
 
-        M = [[Re(R), -Im(R)],
-             [Im(R),  Re(R)]].
-
-  3. Derive the linear term arising from the cross‑term of the VPP
-     objective ``(u+τv)^H R (u+τv)``.  After dropping the constant
-     ``u^H R u``, the relevant cost becomes
-
-        τ² v^H R v + 2τ Re(u^H R v).
-
-     In real coordinates this becomes
-
-        w^T (τ² M) w + g^T w,
-
-     where ``w = [Re(v); Im(v)]`` and ``g`` is a 2·Nr‑dimensional real
-     vector given by
-
-        g = 2τ · [Re(R).T @ Re(u) + Im(R).T @ Im(u),
-                  Re(R).T @ Im(u) − Im(R).T @ Re(u)].
-
-  4. Represent each integer component of ``w`` using ``t+1`` binary
-     variables as in Eq. (7) of the VPP paper:
-
-        w_i = ∑_{m=0}^{t-1} 2^m · q_{i,m} − 2^t · q_{i,t},
-
-     where each ``q_{i,m}∈{0,1}``.  This binary encoding allows
-     ``w_i`` to take on all integer values in ``[−2^t, 2^t − 1]``.
-
-  5. Construct a linear mapping matrix ``B`` such that ``w = B @ q``
-     where ``q`` is the concatenated vector of all binary variables.
-     The QUBO cost in terms of ``q`` is
-
-        E(q) = q^T (B^T (τ² M) B + diag(B^T g)) q.
-
-     The diagonal contribution ``diag(B^T g)`` converts the linear
-     term ``g^T w`` into linear QUBO biases because ``q_i² = q_i`` for
-     binary variables.
-
-The primary function exposed by this module, :func:`build_vpp_qubo`,
-computes the QUBO matrix for given channel matrix ``H``, user data
-vector ``u``, scaling parameter ``τ``, and bit depth ``t``.  It
-returns the symmetric QUBO matrix ``Q`` and a dictionary of
-QUBO coefficients suitable for D‑Wave’s API (biases and couplers).
-
-Example usage::
-
-    import numpy as np
-    from vpp_qubo import build_vpp_qubo
-
-    # Simple 2×2 MIMO channel and user data
-    H = np.array([[1+0.1j, 0.5-0.2j],
-                  [0.3+0.4j, 1.2+0.1j]])
-    u = np.array([1+1j, -1+0.5j])
-    tau = 2.0    # choose based on constellation
-    t = 1        # allow perturbation values in [-2, -1, 0, 1]
-
-    Q_matrix, qubo_dict = build_vpp_qubo(H, u, tau=tau, t=t)
-    print("QUBO dimension:", Q_matrix.shape)
-    print("Number of binary variables:", len(qubo_dict))
-
-References
-----------
-
-* S. Kasi, A. K. Singh, D. Venturelli, and K. Jamieson,
-  "Quantum Annealing for Large MIMO Downlink Vector Perturbation
-  Precoding," 2019, accepted to IEEE ICC 2021.  See Eq. (2) and
-  Eq. (7) for the VPP problem formulation and binary encoding.
-
-* M. Kim, D. Venturelli, and K. Jamieson, "Leveraging Quantum
-  Annealing for Large MIMO Processing in Centralized Radio Access
-  Networks," SIGCOMM 2019.  Appendix A details the derivation of
-  similar QUBO forms for maximum likelihood detection in the MIMO
-  uplink, which is mathematically dual to the downlink VPP problem
-  considered here.
 """
+
 
 from __future__ import annotations
 
@@ -115,24 +41,14 @@ import numpy as np
 
 
 def _compute_R_matrix(H: np.ndarray) -> np.ndarray:
-    """Compute the inverse of ``H Hᴴ``, i.e. ``(H @ H.conj().T)`` inverse.
+    # Step 1 (Eq. 2): build R = (H Hᴴ)⁻¹
+    # --------------------------------------------------
+    # In the paper, Eq. (2) says the transmit power depends on
+    # (u + τv)ᴴ (H Hᴴ)⁻¹ (u + τv).
+    # So the very first thing we need is that matrix R = (H Hᴴ)⁻¹.
+    # If H is not full rank, we fall back to a pseudo-inverse so that
+    # the math still works numerically.
 
-    Parameters
-    ----------
-    H : ndarray of shape (Nr, Nt)
-        Complex channel matrix.
-
-    Returns
-    -------
-    R : ndarray of shape (Nr, Nr)
-        Inverse of ``H @ H.conj().T``.
-
-    Notes
-    -----
-    In zero‑forcing precoding, the transmit precoder is ``P = Hᴴ @ (H Hᴴ)⁻¹``.
-    Minimizing the transmit power amounts to minimizing ``dᴴ (H Hᴴ)⁻¹ d``
-    where ``d = u + τ v``.
-    """
     # Compute Gram matrix at the receiver side
     gram = H @ H.conjugate().T
     # Invert; use pseudo‑inverse if necessary to handle rank‑deficient cases
@@ -141,26 +57,15 @@ def _compute_R_matrix(H: np.ndarray) -> np.ndarray:
 
 
 def _build_block_real_matrix(R: np.ndarray) -> np.ndarray:
-    """Construct the real block matrix ``M`` from complex matrix ``R``.
+    # Step 2: turn complex math into real math
+    # --------------------------------------------------
+    # Eq. (2) is written with complex vectors. To make it usable in QUBO,
+    # we split v into its real and imaginary parts: v = a + j b.
+    # Then we stack them into w = [a; b].
+    # With this trick, vᴴ R v turns into wᵀ M w,
+    # where M is a simple block matrix made of Re(R) and Im(R).
+    # This is the standard way to convert complex quadratics into real ones.
 
-    For a complex Hermitian matrix ``R``, the real mapping matrix
-
-        M = [[Re(R), -Im(R)],
-             [Im(R),  Re(R)]],
-
-    satisfies ``v.conj().T @ R @ v = w.T @ M @ w``, where
-    ``w = [Re(v); Im(v)]``.
-
-    Parameters
-    ----------
-    R : ndarray of shape (Nr, Nr)
-        Complex Hermitian matrix.
-
-    Returns
-    -------
-    M : ndarray of shape (2*Nr, 2*Nr)
-        Real symmetric matrix for the quadratic term in ``w``.
-    """
     Re_R = R.real
     Im_R = R.imag
     # Construct the block matrix
@@ -171,67 +76,44 @@ def _build_block_real_matrix(R: np.ndarray) -> np.ndarray:
 
 
 def _compute_linear_term(R: np.ndarray, u: np.ndarray, tau: float) -> np.ndarray:
-    """Compute the linear vector ``g`` for the VPP cost function.
+    # Step 3: grab the "cross term" 2τ·Re(uᴴ R v)
+    # --------------------------------------------------
+    # When you expand (u + τv)ᴴ R (u + τv), three pieces pop out:
+    #   • uᴴ R u   (a constant we can ignore),
+    #   • 2τ Re(uᴴ R v)  <-- this is the linear term in v,
+    #   • τ² vᴴ R v      (the quadratic term we already handled with M).
+    # This function computes that middle piece, but written in terms of
+    # real vectors, so we can later plug it into the QUBO.
 
-    The linear term arises from the cross term ``2τ Re(uᴴ R v)`` in
-    ``(u + τ v)ᴴ R (u + τ v)``.  In real coordinates it can be expressed as
-
-        g = 2τ · [Re(R).T @ Re(u) + Im(R).T @ Im(u),
-                  Re(R).T @ Im(u) − Im(R).T @ Re(u)].
-
-    Parameters
-    ----------
-    R : ndarray of shape (Nr, Nr)
-        Complex matrix ``(H Hᴴ)⁻¹``.
-    u : ndarray of shape (Nr,)
-        Complex user data vector (symbols).
-    tau : float
-        Scaling constant ``τ = 2(|c_max| + Δ/2)`` controlling the
-        integer spacing of perturbation values.
-
-    Returns
-    -------
-    g : ndarray of shape (2*Nr,)
-        Real vector corresponding to linear coefficients in ``w``.
-    """
     # Split real and imaginary parts
     c = u.real
     d = u.imag
+
     Re_R = R.real
     Im_R = R.imag
-    # Compute the two halves
-    g1 = Re_R.T @ c + Im_R.T @ d
-    g2 = Re_R.T @ d - Im_R.T @ c
-    # Combine and scale
-    g = 2.0 * tau * np.concatenate([g1, g2])
+
+    # Compute M @ u' without explicitly forming M:
+    # top block: Re(R) @ c  - Im(R) @ d
+    # bot block: Im(R) @ c  + Re(R) @ d
+    top = Re_R @ c - Im_R @ d
+    bot = Im_R @ c + Re_R @ d
+    u_real = np.concatenate([top, bot])  # this equals (M @ u')
+
+    g = 2.0 * tau * u_real
     return g
 
 
 def _build_binary_mapping(num_vars: int, t: int) -> np.ndarray:
-    """Create the linear mapping matrix ``B`` from binary variables to integer values.
+    # Step 4 (Eq. 7): represent each integer with bits
+    # --------------------------------------------------
+    # Each entry of w must be an integer. Eq. (7) in the paper shows
+    # how to encode it using binary variables:
+    #   w_i = sum_{m=0}^{t-1} 2^m q_{i,m} - 2^t q_{i,t}
+    # So with t=1, you get values in { -2, -1, 0, 1 }.
+    # This function just builds a big matrix B so that w = B q,
+    # where q is the vector of all binary bits. That way, the mapping
+    # is linear and easy to apply.
 
-    Each real coordinate of the perturbation vector ``w`` is encoded using
-    ``t+1`` binary variables ``q_{i,0}, …, q_{i,t}`` via
-
-        w_i = Σ_{m=0}^{t-1} 2^m · q_{i,m} − 2^t · q_{i,t}.
-
-    Here ``num_vars`` is the dimension of ``w`` (``2×Nr``).  The total
-    number of binary variables is ``num_vars * (t+1)``.
-
-    Parameters
-    ----------
-    num_vars : int
-        Length of the real perturbation vector ``w`` (equal to 2×Nr).
-    t : int
-        Bit depth controlling the range of integer values; the encoded
-        integers lie in ``[−2^t, 2^t − 1]``.
-
-    Returns
-    -------
-    B : ndarray of shape (num_vars, num_vars * (t+1))
-        Mapping matrix such that ``w = B @ q`` where ``q`` is a vector
-        of binary variables.
-    """
     total_bits = num_vars * (t + 1)
     B = np.zeros((num_vars, total_bits), dtype=float)
     # For each real coordinate, assign bit weights
@@ -253,55 +135,25 @@ def build_vpp_qubo(
     t: int = 1,
     *,
     return_matrix: bool = True,
-) -> Tuple[np.ndarray, Dict[Tuple[int, int], float]]:
-    """Construct the QUBO formulation for the downlink VPP problem.
+    ) -> Tuple[np.ndarray, Dict[Tuple[int, int], float]]:
+    # Step 5 (Eq. 8): put it all together → final QUBO
+    # --------------------------------------------------
+    # By now we have:
+    #   • Quadratic part: τ² wᵀ M w
+    #   • Linear part: gᵀ w
+    #   • Mapping: w = B q
+    #
+    # Substitute w = B q:
+    #   E(q) = qᵀ [Bᵀ (τ² M) B] q  +  (Bᵀ g)ᵀ q
+    #
+    # To make this pure QUBO, we move the linear term onto the diagonal
+    # (since q_i² = q_i for binary). That gives:
+    #   Q = Bᵀ (τ² M) B + diag(Bᵀ g)
+    #
+    # • The diagonal entries of Q are the "biases" f_i.
+    # • The off-diagonals are the "couplers" g_{ij}.
+    # This is exactly Eq. (8) in the paper.
 
-    Given a channel matrix ``H`` and data vector ``u``, this function
-    computes the symmetric QUBO matrix ``Q`` whose quadratic form
-    ``qᵀ Q q`` encodes the cost of the perturbation vector ``v`` for
-    minimizing transmit power in vector perturbation precoding.  The
-    binary variables ``q`` are related to the real perturbation values via
-    a linear mapping as described in Eq. (7) of the VPP paper.
-
-    Parameters
-    ----------
-    H : ndarray of shape (Nr, Nt)
-        Complex channel matrix.
-    u : ndarray of shape (Nr,)
-        Complex vector of user data symbols to be precoded.
-    tau : float
-        Scaling constant ``τ`` that determines the spacing of the
-        perturbation lattice.  In VPP this is ``2(|c_max| + Δ/2)``; users
-        may choose ``tau`` appropriate for their modulation order.
-    t : int, optional (default=1)
-        Bit depth of the integer representation.  The perturbation values
-        will lie in ``[−2^t, 2^t − 1]``.  Empirically, t=1 suffices for
-        common constellations (values in {−2, −1, 0, 1}).
-    return_matrix : bool, optional (default=True)
-        If ``True``, return both the full symmetric QUBO matrix ``Q`` and
-        the dictionary of QUBO coefficients.  If ``False``, return only
-        the dictionary of QUBO coefficients.
-
-    Returns
-    -------
-    Q : ndarray of shape (nq, nq)
-        Symmetric QUBO matrix.  Only returned when ``return_matrix`` is
-        ``True``.
-    qubo : dict mapping (int, int) → float
-        Dictionary representation of the QUBO suitable for use with
-        D‑Wave’s API.  The keys are pairs ``(i,j)`` with ``i ≤ j``, and
-        the values are the corresponding coefficients.  Diagonal entries
-        represent linear biases and off‑diagonal entries represent
-        couplers.
-
-    Notes
-    -----
-    The formulation here does not perform any of the pre‑processing
-    steps (coefficient scaling and thresholding) described in
-    Section III B of the VPP paper.  Those steps can be applied to
-    ``Q`` and the returned coefficients as a post‑processing step, if
-    desired.
-    """
     # Validate dimensions
     Nr, Nt = H.shape
     if u.shape[0] != Nr:
@@ -310,8 +162,12 @@ def build_vpp_qubo(
     R = _compute_R_matrix(H)
     # 2. Construct block‑real matrix M for vᴴ R v
     M = _build_block_real_matrix(R)
-    # 3. Linear term g for cross term
-    g = _compute_linear_term(R, u, tau)
+    
+    # 3. Linear term g for cross term (compute directly from M to avoid drift)
+    #    E(w) = τ² wᵀ M w + (2τ M u')ᵀ w + const
+    u_prime = np.concatenate([u.real, u.imag])        # shape (2*Nr,)
+    g = 2.0 * tau * (M @ u_prime)                     # shape (2*Nr,)
+
     # 4. Binary mapping matrix B
     num_vars = 2 * Nr
     B = _build_binary_mapping(num_vars, t)
@@ -339,36 +195,15 @@ def build_vpp_qubo(
 def qubo_to_ising(
     qubo: Dict[Tuple[int, int], float]
 ) -> Tuple[Dict[int, float], Dict[Tuple[int, int], float]]:
-    """Convert a QUBO dictionary into an equivalent Ising form.
+    # Optional: convert QUBO → Ising form
+    # --------------------------------------------------
+    # Some solvers prefer spins s_i ∈ {−1, +1} instead of bits q_i ∈ {0,1}.
+    # The change of variables is simple: s_i = 2 q_i − 1.
+    # After substitution, you get the familiar Ising form:
+    #   E(s) = sum_i h_i s_i + sum_{i<j} J_ij s_i s_j + const
+    # where h_i are the linear biases and J_ij are the couplings.
+    # This is standard, and is the same trick used in the uplink MLD paper.
 
-    The QUBO energy function is
-
-        E(q) = Σ_i,j Q_{ij} q_i q_j,
-
-    where ``q_i ∈ {0, 1}``.  The corresponding Ising variables are
-    defined via the linear change of variables ``s_i = 2 q_i − 1``
-    (giving ``s_i ∈ {−1, +1}``).  Substituting and collecting terms
-    yields an Ising model
-
-        E(s) = Σ_i h_i s_i + Σ_{i<j} J_{ij} s_i s_j + const.
-
-    This function computes the biases ``h`` and couplers ``J`` from a
-    QUBO dictionary.  Constant offsets are omitted because they do
-    not affect the optimization.
-
-    Parameters
-    ----------
-    qubo : dict mapping (int, int) → float
-        QUBO coefficients with ``i ≤ j`` keys.
-
-    Returns
-    -------
-    h : dict mapping int → float
-        Biases for Ising variables.
-    J : dict mapping (int, int) → float
-        Coupling strengths between pairs of Ising variables ``(i, j)`` with
-        ``i < j``.
-    """
     # Determine number of variables from keys
     if not qubo:
         return {}, {}
